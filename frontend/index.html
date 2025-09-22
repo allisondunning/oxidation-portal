@@ -55,19 +55,11 @@
 
 <script>
 const API = "https://oxidation-api.onrender.com/run_experiments";
-
-const payload = /* your JSON object */;
-fetch(API, {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "x-labtoken": "Oxide!2025!HW4"        // must match Render LABTOKEN exactly
-  },
-  body: JSON.stringify(payload)
-})
-
+const TOKEN = "Oxide!2025!HW4"; // must match LABTOKEN on Render
 
 const $ = sel => document.querySelector(sel);
+
+// (Optional) preload the textbox with the template
 $("#fill").onclick = () => {
   $("#json").value = `{
   "objective": "Hit 100 nm with minimal nonuniformity",
@@ -89,24 +81,28 @@ $("#submit").onclick = async () => {
   let payload;
   try {
     payload = JSON.parse($("#json").value);
-  } catch (e) {
+  } catch {
     alert("Invalid JSON. Please fix and try again.");
     return;
   }
 
+  // IMPORTANT: include the token header
   const res = await fetch(API, {
     method: "POST",
-    headers: {"Content-Type":"application/json"},
+    headers: {
+      "Content-Type": "application/json",
+      "x-labtoken": TOKEN
+    },
     body: JSON.stringify(payload)
   });
 
+  const text = await res.text();
   if (!res.ok) {
-    const txt = await res.text();
-    alert("Error from server:\n" + txt);
+    alert(`Error ${res.status}:\n${text}`);
     return;
   }
 
-  const data = await res.json();
+  const data = JSON.parse(text);
   $("#result").style.display = "block";
   $("#log").textContent = data.run_log + "  (Result ID: " + data.uid + ")";
   $("#plot").src = "data:image/png;base64," + data.preview_plot_png_base64;
@@ -125,8 +121,10 @@ $("#submit").onclick = async () => {
   };
 };
 </script>
+
 </body>
 </html>
+
 
 
 
