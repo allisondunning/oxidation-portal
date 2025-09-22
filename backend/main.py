@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, validator
 from typing import List, Literal, Optional
 import hashlib, io, base64, csv, math, random, time
 from matplotlib import pyplot as plt
+import os
 
 # --- FastAPI app ---
 app = FastAPI(title="Oxidation Technician")
@@ -137,5 +138,6 @@ def run_experiments(req: Request):
         tech_note=note,
         uid=uid
     )
+
 
 
