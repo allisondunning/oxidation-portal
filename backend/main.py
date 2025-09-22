@@ -8,6 +8,17 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
+# add to your imports at top
+from fastapi import Header
+from fastapi.responses import PlainTextResponse, JSONResponse
+import json, datetime, os
+
+# choose a log location that works locally and on Render
+LOG_DIR = "/data" if os.path.isdir("/data") else "."    # /data exists if you add a Render Disk
+LOG_PATH = os.path.join(LOG_DIR, "submissions_log.csv")
+
+
+
 # ---- FastAPI app ----
 app = FastAPI(title="Oxidation Technician")
 
@@ -143,4 +154,5 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
         tech_note=note,
         uid=uid
     )
+
 
