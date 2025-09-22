@@ -6,6 +6,12 @@ import hashlib, io, base64, csv, math, random, time
 from matplotlib import pyplot as plt
 import os
 
+
+headers: {
+  "Content-Type": "application/json",
+  "x-labtoken": "Oxide!2025!HW4"  // must match LABTOKEN on the backend
+}
+
 # --- FastAPI app ---
 app = FastAPI(title="Oxidation Technician")
 
@@ -138,6 +144,7 @@ def run_experiments(req: Request):
         tech_note=note,
         uid=uid
     )
+
 
 
 
