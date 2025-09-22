@@ -7,16 +7,14 @@ from matplotlib import pyplot as plt
 
 # --- FastAPI app ---
 app = FastAPI(title="Oxidation Technician")
+
+ALLOWED = os.getenv("ALLOWED_ORIGINS", "").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:5500",
-        "http://localhost:5500",
-	"http://192.168.1.168:5500",
-    ],
+    allow_origins=[o.strip() for o in ALLOWED if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["Content-Type", "x-labtoken", "*"],  # covers preflight headers
 )
 
 ASSIGNMENT_ID = "ECSE322F25_HW4_OXIDATION"
@@ -139,4 +137,5 @@ def run_experiments(req: Request):
         tech_note=note,
         uid=uid
     )
+
 
