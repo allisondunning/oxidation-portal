@@ -11,18 +11,19 @@ from matplotlib import pyplot as plt
 # ---- FastAPI app ----
 app = FastAPI(title="Oxidation Technician")
 
-# Settings from environment (Render → Environment)
 ALLOWED = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 LABTOKEN = os.getenv("LABTOKEN", "")
 
-# CORS
+from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED or ["*"],      # tighten to your exact site in prod
+    allow_origins=ALLOWED or ["https://microchip-fabrication-tech.onrender.com"],  # exact origin(s)
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["Content-Type", "x-labtoken"],
+    allow_headers=["*"],   # <-- important
 )
+
+
 
 @app.get("/health")
 def health():
@@ -142,3 +143,4 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
         tech_note=note,
         uid=uid
     )
+
