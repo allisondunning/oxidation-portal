@@ -54,7 +54,18 @@
   </div>
 
 <script>
-const API = "https://oxidation-api.onrender.com/run_experiments"; // <- set to your HTTPS endpoint
+const API = "https://oxidation-api.onrender.com/run_experiments";
+
+const payload = /* your JSON object */;
+fetch(API, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "x-labtoken": "Oxide!2025!HW4"        // must match Render LABTOKEN exactly
+  },
+  body: JSON.stringify(payload)
+})
+
 
 const $ = sel => document.querySelector(sel);
 $("#fill").onclick = () => {
@@ -116,5 +127,6 @@ $("#submit").onclick = async () => {
 </script>
 </body>
 </html>
+
 
 
