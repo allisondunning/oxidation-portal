@@ -25,6 +25,14 @@ app = FastAPI(title="Oxidation Technician")
 ALLOWED = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 LABTOKEN = os.getenv("LABTOKEN", "")
 
+def _check_token(value): 
+    if LABTOKEN and value != LABTOKEN:
+        raise HTTPException(status_code=401, detail="invalid token")
+
+# your route signature should accept the header:
+# def run_experiments(req: RequestOrExperimentRequest, x_labtoken: str | None = Header(None)):
+_check_token(x_labtoken)
+
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
@@ -154,5 +162,17 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
         tech_note=note,
         uid=uid
     )
+
+stamp = datetime.datetime.now().isoformat()
+line = f"{stamp},{req.student_id},{len(req.design.runs)},{json.dumps(req.target)}\n"
+
+print(f"[SUBMISSION] {line.strip()}")  # ⇦ shows up immediately in Render → Logs
+
+# ensure header + file exist
+if not os.path.exists(LOG_PATH):
+    with open(LOG_PATH, "w", encoding="utf-8") as f:
+        f.write("timestamp,student_id,n_runs,target\n")
+with open(LOG_PATH, "a", encoding="utf-8") as f:
+    f.write(line)
 
 
