@@ -5,12 +5,36 @@ from typing import List, Literal, Optional
 import hashlib, io, base64, csv, math, random, time
 from matplotlib import pyplot as plt
 import os
+from typing import Optional
 
+# Read settings from Render env vars
+ALLOWED = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+LABTOKEN = os.getenv("LABTOKEN")  # e.g., Oxide!2025!HW4  (set in Render)
 
+# CORS: allow your static-site origin and the custom header
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED or ["*"],     # you can tighten this to your exact site later
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["Content-Type", "x-labtoken"],  # <— important
+)
 headers: {
   "Content-Type": "application/json",
   "x-labtoken": "Oxide!2025!HW4"  // must match LABTOKEN on the backend
 }
+
+
+
+
+@app.post("/run_experiments", response_model=Response)
+def run_experiments(
+    req: Request,
+    x_labtoken: Optional[str] = Header(None)     # header name: x-labtoken
+):
+    if LABTOKEN and x_labtoken != LABTOKEN:
+        raise HTTPException(status_code=401, detail="invalid token")
+    # ... rest of your function ...
 
 # --- FastAPI app ---
 app = FastAPI(title="Oxidation Technician")
@@ -144,6 +168,7 @@ def run_experiments(req: Request):
         tech_note=note,
         uid=uid
     )
+
 
 
 
