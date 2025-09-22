@@ -1,58 +1,38 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 from typing import List, Literal, Optional
-import hashlib, io, base64, csv, math, random, time
+import hashlib, io, base64, csv, math, random, time, os, json, datetime
+
+import matplotlib
+matplotlib.use("Agg")
 from matplotlib import pyplot as plt
-import os
-from typing import Optional
 
-# Read settings from Render env vars
-ALLOWED = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-LABTOKEN = os.getenv("LABTOKEN")  # e.g., Oxide!2025!HW4  (set in Render)
-
-# CORS: allow your static-site origin and the custom header
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED or ["*"],     # you can tighten this to your exact site later
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["Content-Type", "x-labtoken"],  # <— important
-)
-headers: {
-  "Content-Type": "application/json",
-  "x-labtoken": "Oxide!2025!HW4"  // must match LABTOKEN on the backend
-}
-
-
-
-
-@app.post("/run_experiments", response_model=Response)
-def run_experiments(
-    req: Request,
-    x_labtoken: Optional[str] = Header(None)     # header name: x-labtoken
-):
-    if LABTOKEN and x_labtoken != LABTOKEN:
-        raise HTTPException(status_code=401, detail="invalid token")
-    # ... rest of your function ...
-
-# --- FastAPI app ---
+# ---- FastAPI app ----
 app = FastAPI(title="Oxidation Technician")
 
-ALLOWED = os.getenv("ALLOWED_ORIGINS", "").split(",")
+# Settings from environment (Render → Environment)
+ALLOWED = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+LABTOKEN = os.getenv("LABTOKEN", "")
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in ALLOWED if o.strip()],
+    allow_origins=ALLOWED or ["*"],      # tighten to your exact site in prod
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["Content-Type", "x-labtoken", "*"],  # covers preflight headers
+    allow_headers=["Content-Type", "x-labtoken"],
 )
+
+@app.get("/health")
+def health():
+    return {"ok": True}
 
 ASSIGNMENT_ID = "ECSE322F25_HW4_OXIDATION"
 
-# --- Models ---
+# ---- Models ----
 Ambient = Literal["dry", "wet"]
-Orient = Literal["100", "111"]
+Orient  = Literal["100", "111"]
 
 class Run(BaseModel):
     temp_C: int = Field(ge=900, le=1100)
@@ -71,7 +51,7 @@ class Design(BaseModel):
             raise ValueError("runs must have 1–12 items")
         return v
 
-class Request(BaseModel):
+class ExperimentRequest(BaseModel):
     objective: str
     target: Optional[dict] = None
     design: Design
@@ -79,14 +59,14 @@ class Request(BaseModel):
     student_id: str
     section: str
 
-class Response(BaseModel):
+class ExperimentResponse(BaseModel):
     run_log: str
     csv_base64: str
     preview_plot_png_base64: str
     tech_note: str
     uid: str  # unique result id
 
-# --- Core simulator (tunable but deterministic per student) ---
+# ---- Core simulator ----
 def get_rng(student_id: str) -> random.Random:
     seed = int(hashlib.sha256((student_id + ASSIGNMENT_ID).encode()).hexdigest(), 16) % (2**32)
     return random.Random(seed)
@@ -98,27 +78,28 @@ def growth_nm(temp_C: int, ambient: str, time_min: int) -> float:
     base = (DRY if ambient == "dry" else WET)[temp_C]
     return base * time_min
 
-@app.post("/run_experiments", response_model=Response)
-def run_experiments(req: Request):
-    # Deterministic randomness per student, but:
-    # add a small per-run jitter keyed by (student_id, run_index) so repeats look “lab-like”
+@app.post("/run_experiments", response_model=ExperimentResponse)
+def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(None)):
+    # Token gate (optional but recommended)
+    if LABTOKEN and x_labtoken != LABTOKEN:
+        raise HTTPException(status_code=401, detail="invalid token")
+
     rng = get_rng(req.student_id)
 
     rows = [("run_id","temp_C","ambient","time_min","orientation","preclean",
              "thick_center_nm","thick_edge_nm","nonuniformity_pct")]
-
     centers = []
+
     for i, r in enumerate(req.design.runs, start=1):
         mean = growth_nm(r.temp_C, r.ambient, r.time_min)
 
-        # Small systematic effects
+        # Systematic effects
         orient_k = 0.90 if r.orientation == "111" else 1.00
         pre_k    = 1.05 if r.preclean else 1.00
 
-        # Per-run noise (student-deterministic + run-index jitter)
-        # Spread ~3–6%; occasionally a bigger blip
+        # Noise (~4% with occasional extra wiggle)
         base_noise_sigma = 0.04
-        big_bump = 1.0 + abs(rng.gauss(0, 0.5)) * 0.01  # rare extra 1% wiggle
+        big_bump = 1.0 + abs(rng.gauss(0, 0.5)) * 0.01
         noise = rng.gauss(0, base_noise_sigma) * big_bump
 
         center = max(0.0, mean * orient_k * pre_k * (1 + noise))
@@ -134,42 +115,30 @@ def run_experiments(req: Request):
 
     # CSV
     buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerows(rows)
+    csv.writer(buf).writerows(rows)
     csv_b64 = base64.b64encode(buf.getvalue().encode()).decode()
 
-    # Quick plot
-    import matplotlib
-    matplotlib.use("Agg")
+    # Plot
     plt.figure()
     plt.plot(range(1, len(centers)+1), centers, marker="o")
-    plt.xlabel("Run")
-    plt.ylabel("Center thickness (nm)")
+    plt.xlabel("Run"); plt.ylabel("Center thickness (nm)")
     plt.title("Oxide Growth — Center Thickness")
     plt.tight_layout()
-    img = io.BytesIO()
-    plt.savefig(img, format="png"); plt.close()
+    img = io.BytesIO(); plt.savefig(img, format="png"); plt.close()
     png_b64 = base64.b64encode(img.getvalue()).decode()
 
+    # Note + log
     note = ("Runs completed. Thickness increases with temperature/time; wet grows faster. "
             "Uniformity is typically worse for wet. Consider a confirmation near target and a uniformity check.")
-
     uid = f"{req.student_id}-{int(time.time())}"
 
     with open("submissions_log.csv", "a", encoding="utf-8") as f:
-        import json, datetime
         f.write(f"{datetime.datetime.now().isoformat()},{req.student_id},{len(req.design.runs)},{json.dumps(req.target)}\n")
 
-
-    return Response(
+    return ExperimentResponse(
         run_log=f"Processed {len(req.design.runs)} run(s).",
         csv_base64=csv_b64,
         preview_plot_png_base64=png_b64,
         tech_note=note,
         uid=uid
     )
-
-
-
-
-
