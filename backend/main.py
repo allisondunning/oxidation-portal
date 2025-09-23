@@ -24,7 +24,7 @@ app.add_middleware(
     allow_origins=ALLOWED or ["https://microchip-fabrication-tech.onrender.com"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],  # allow x-labtoken + content-type, etc.
+    allow_headers=["*"],  # important: covers x-labtoken, content-type, etc.
 )
 
 @app.get("/health")
@@ -199,4 +199,5 @@ def stats(x_labtoken: Optional[str] = Header(None), token: Optional[str] = None)
                 _, sid, _, _ = line.rstrip("\n").split(",", 4)
                 counts[sid] = counts.get(sid, 0) + 1
     return JSONResponse({"by_student": counts, "total": sum(counts.values())})
+
 
