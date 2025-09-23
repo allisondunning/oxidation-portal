@@ -12,21 +12,20 @@ from matplotlib import pyplot as plt
 # ---------- App & settings ----------
 app = FastAPI(title="Oxidation Technician")
 
-ALLOWED  = [o.strip() for o in os.getenv("ALLOWED_ORIGINS","").split(",") if o.strip()]
-LABTOKEN = os.getenv("LABTOKEN","")
+ALLOWED   = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+LABTOKEN  = os.getenv("LABTOKEN", "")
+
+# Logs: persist to /data if you add a Render Disk, else current dir
+LOG_DIR  = "/data" if os.path.isdir("/data") else "."
+LOG_PATH = os.path.join(LOG_DIR, "submissions_log.csv")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED or ["https://microchip-fabrication-tech.onrender.com"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"],  # allow x-labtoken + content-type, etc.
 )
-
-# Logs: persist to /data if you add a Render Disk, else current dir
-LOG_DIR  = "/data" if os.path.isdir("/data") else "."
-LOG_PATH = os.path.join(LOG_DIR, "submissions_log.csv")
-
 
 @app.get("/health")
 def health():
@@ -78,32 +77,11 @@ def get_rng(student_id: str) -> random.Random:
     seed = int(hashlib.sha256((student_id + ASSIGNMENT_ID).encode()).hexdigest(), 16) % (2**32)
     return random.Random(seed)
 
-def deal_grove_thickness_nm(temp_C: int, ambient: str, time_min: int, x0_nm: float = 0.0) -> float:
-    """
-    Returns final oxide thickness (nm) after time_min, starting from initial oxide x0_nm.
-    Pedagogical parameters (tunable) keyed by (ambient, T). Units: A [um], B [um^2/min].
-    Solves: x^2 + A x = (x0^2 + A x0) + B t
-    """
-    # ---- Toy but plausible parameters (tune to your lecture numbers) ----
-    A_um = {
-        ('dry',  900): 0.080, ('dry', 1000): 0.070, ('dry', 1100): 0.060,
-        ('wet',  900): 0.040, ('wet', 1000): 0.035, ('wet', 1100): 0.030
-    }[(ambient, temp_C)]
-    B_um2_per_min = {
-        ('dry',  900): 1.0e-4, ('dry', 1000): 2.0e-4, ('dry', 1100): 6.0e-4,
-        ('wet',  900): 6.0e-4, ('wet', 1000): 2.0e-3, ('wet', 1100): 5.0e-3
-    }[(ambient, temp_C)]
-
-    # Initial condition (convert nm → um)
-    x0_um = max(0.0, x0_nm / 1000.0)
-
-    rhs = x0_um * x0_um + A_um * x0_um + B_um2_per_min * float(time_min)
-    disc = A_um * A_um + 4.0 * rhs
-    x_um = (-A_um + math.sqrt(max(0.0, disc))) / 2.0
-    return max(0.0, 1000.0 * x_um)  # → nm
-
-
-
+def growth_nm(temp_C: int, ambient: str, time_min: int) -> float:
+    DRY = {900:0.6, 1000:1.0, 1100:3.3}
+    WET = {900:2.0, 1000:5.0, 1100:10.0}
+    base = (DRY if ambient == "dry" else WET)[temp_C]
+    return base * time_min
 
 # ---------- Routes ----------
 @app.post("/run_experiments", response_model=ExperimentResponse)
@@ -116,23 +94,7 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
     centers = []
 
     for i, r in enumerate(req.design.runs, start=1):
-
-                         # --- Deal–Grove base thickness (nm) ---
-        base = deal_grove_thickness_nm(r.temp_C, r.ambient, r.time_min, x0_nm=x0_nm)
-        
-        # Systematic effects (keep as before)
-        orient_k = 0.90 if r.orientation == "111" else 1.00
-        pre_k    = 1.05 if r.preclean else 1.00
-        
-        # Apply small multiplicative modifiers to the base thickness
-        mean = base * orient_k * pre_k
-        
-        # Noise (~4% with occasional extra wiggle) — keep your existing noise code
-        base_noise_sigma = 0.04
-        big_bump = 1.0 + abs(rng.gauss(0, 0.5)) * 0.01
-        noise = rng.gauss(0, base_noise_sigma) * big_bump
-        center = max(0.0, mean * (1 + noise))
-
+        mean = growth_nm(r.temp_C, r.ambient, r.time_min)
         orient_k = 0.90 if r.orientation == "111" else 1.00
         pre_k    = 1.05 if r.preclean else 1.00
         base_noise_sigma = 0.04
@@ -200,6 +162,3 @@ def stats(x_labtoken: Optional[str] = Header(None), token: Optional[str] = None)
                 _, sid, _, _ = line.rstrip("\n").split(",", 4)
                 counts[sid] = counts.get(sid, 0) + 1
     return JSONResponse({"by_student": counts, "total": sum(counts.values())})
-
-
-
