@@ -17,13 +17,13 @@ ALLOWED  = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.
 LABTOKEN = os.getenv("LABTOKEN", "")
 
 # Logs: persist to /data if you add a Render Disk, else current dir
-LOG_DIR  = "/data" if os.path.isdir("/data") else "."
-LOG_PATH = os.path.join(LOG_DIR, "submissions_log.csv")
-LOG_DG_PATH = os.path.join(LOG_DIR, "dg_params_log.csv")  # NEW: per-run DG params
+LOG_DIR      = "/data" if os.path.isdir("/data") else "."
+LOG_PATH     = os.path.join(LOG_DIR, "submissions_log.csv")
+LOG_DG_PATH  = os.path.join(LOG_DIR, "dg_params_log.csv")  # NEW: per-run DG parameters
 
 # Rate limit (per student_id)
-RL_WINDOW_S = int(os.getenv("RL_WINDOW_S", "300"))  # 5 min
-RL_MAX_HITS = int(os.getenv("RL_MAX_HITS", "10"))   # 10 req/window
+RL_WINDOW_S = int(os.getenv("RL_WINDOW_S", "300"))  # 5 min default
+RL_MAX_HITS = int(os.getenv("RL_MAX_HITS", "10"))   # 10 requests per window
 _BUCKET: Dict[str, List[float]] = {}
 
 app.add_middleware(
@@ -31,7 +31,7 @@ app.add_middleware(
     allow_origins=ALLOWED or ["https://microchip-fabrication-tech.onrender.com"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"],  # allow x-labtoken + content-type, etc.
 )
 
 FRONTEND_ORIGIN = (ALLOWED[0] if ALLOWED else "https://microchip-fabrication-tech.onrender.com").strip()
@@ -62,7 +62,7 @@ def check_rate_limit(student_id: str):
     if not sid:
         raise HTTPException(status_code=400, detail="student_id required")
     hits = _BUCKET.get(sid, [])
-    hits = [t for t in hits if (now - t) < RL_WINDOW_S]
+    hits = [t for t in hits if (now - t) < RL_WINDOW_S]  # drop old
     if len(hits) >= RL_MAX_HITS:
         raise HTTPException(status_code=429, detail="Too many submissions; try again later.")
     hits.append(now)
@@ -80,7 +80,6 @@ class Run(BaseModel):
     time_min: int = Field(ge=5, le=240)
     orientation: Orient
     preclean: bool
-
     @validator("temp_C")
     def temp_step(cls, v):
         if v % 10 != 0:
@@ -116,7 +115,7 @@ class ExperimentResponse(BaseModel):
 # ---------- Deal–Grove via Arrhenius ----------
 KB_eV_per_K = 8.617333262e-5  # Boltzmann (eV/K)
 
-# Distinct pedagogical reference values (not from any slide)
+# Pedagogical reference values (distinct from slides)
 # Units: B_ref [um^2/min], BA_ref [um/min], Tref_C [°C], Ea [eV]
 DG_REF = {
     "dry": {"Tref_C": 1000, "B_ref": 3.2e-4, "BA_ref": 0.014, "Ea_B_eV": 1.15, "Ea_BA_eV": 2.05},
@@ -140,7 +139,7 @@ def dg_params_from_arrhenius(ambient: str, temp_C: int) -> Tuple[float, float, f
     return A, B, BA
 
 def deal_grove_thickness_nm(temp_C: int, ambient: str, time_min: int, x0_nm: float = 0.0) -> float:
-    """Solve x^2 + A x = (x0^2 + A x0) + B t   for x (um), then return nm."""
+    """Solve x^2 + A x = (x0^2 + A x0) + B t  for x (um), then return nm."""
     A_um, B_um2_per_min, _ = dg_params_from_arrhenius(ambient, temp_C)
     x0_um = max(0.0, float(x0_nm)/1000.0)
     rhs = x0_um*x0_um + A_um*x0_um + B_um2_per_min*float(time_min)
@@ -174,7 +173,7 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
     map_arrays: List[np.ndarray] = []
     centers: List[float] = []
 
-    # collect DG params per run (logged later)
+    # Collect DG params for logging
     dg_param_rows: List[Tuple[int,int,str,float,float,float]] = []  # (run_id,temp,ambient,B,BA,A)
 
     for i, r in enumerate(req.design.runs, start=1):
@@ -186,7 +185,7 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
         pre_k    = 1.05 if r.preclean else 1.00
         mean = base * orient_k * pre_k
 
-        # Noise (~4%)
+        # Noise (~4% with occasional extra wiggle)
         base_noise_sigma = 0.04
         big_bump = 1.0 + abs(rng.gauss(0, 0.5)) * 0.01
         noise = rng.gauss(0, base_noise_sigma) * big_bump
@@ -205,25 +204,25 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
         A_um, B_um2_per_min, BA_um_per_min = dg_params_from_arrhenius(r.ambient, r.temp_C)
         dg_param_rows.append((i, r.temp_C, r.ambient, B_um2_per_min, BA_um_per_min, A_um))
 
-        # 3×3 map (radial thinning) with circular wafer mask
+        # 3×3 map with circular wafer mask (corners cut off)
         grid = np.zeros((3,3), dtype=float)
         mask = np.zeros((3,3), dtype=bool)
         maxr = math.hypot(1,1)  # sqrt(2)
         for a in range(3):
             for b in range(3):
                 rnorm = math.hypot(a-1, b-1) / maxr  # 0..1
-                if rnorm >= 1.0 - 1e-12:  # outside wafer edge
+                if rnorm >= 1.0 - 1e-12:  # outside wafer edge -> mask
                     mask[a, b] = True
                     grid[a, b] = np.nan
                 else:
                     shape = 0.6 + 0.4 * rnorm
                     grid[a, b] = max(0.0, center * (1 - nonuni * shape))
         map_arrays.append(np.array(grid, dtype=float))
-        # For CSV, leave masked entries blank
+        # CSV with blanks for masked cells
         flat = []
         for a in range(3):
             for b in range(3):
-                val = "" if mask[a, b] else round(grid[a, b], 1)
+                val = "" if np.isnan(grid[a, b]) else round(grid[a, b], 1)
                 flat.append(val)
         map_rows.append((i, *flat))
 
@@ -232,12 +231,12 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
     csv.writer(buf).writerows(rows)
     csv_b64 = base64.b64encode(buf.getvalue().encode()).decode()
 
-    # Map CSV
+    # Map CSV (3×3)
     mbuf = io.StringIO(newline="")
     csv.writer(mbuf).writerows(map_rows)
     map_csv_b64 = base64.b64encode(mbuf.getvalue().encode()).decode()
 
-    # Composite wafer-map PNG (transparent corners)
+    # Composite wafer-map PNG (NaNs transparent)
     wafer_maps_png_base64 = ""
     if map_arrays:
         n = len(map_arrays)
@@ -267,7 +266,7 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
         plt.close(fig)
         wafer_maps_png_base64 = base64.b64encode(buf_img.getvalue()).decode()
 
-    # --- BAR plot: center thickness vs run ---
+    # BAR plot: center thickness vs run
     plt.figure()
     x = np.arange(1, len(centers)+1)
     plt.bar(x, centers)
@@ -282,7 +281,7 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
     record = {"timestamp": stamp, "student_id": req.student_id, "n_runs": len(req.design.runs), "target": req.target}
     print(f"[SUBMISSION] {json.dumps(record, separators=(',',':'))}")
 
-    # submission log
+    # Submission log (one row per submission)
     sub_need_header = not os.path.exists(LOG_PATH)
     with open(LOG_PATH, "a", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
