@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel, Field, validator
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Dict, Tuple
 import hashlib, io, base64, csv, math, random, time, os, json, datetime
 
 import matplotlib
@@ -18,6 +18,11 @@ LABTOKEN = os.getenv("LABTOKEN", "")
 # Logs: persist to /data if you add a Render Disk, else current dir
 LOG_DIR  = "/data" if os.path.isdir("/data") else "."
 LOG_PATH = os.path.join(LOG_DIR, "submissions_log.csv")
+
+# Rate limit (per student_id)
+RL_WINDOW_S = int(os.getenv("RL_WINDOW_S", "300"))  # 5 min default
+RL_MAX_HITS = int(os.getenv("RL_MAX_HITS", "10"))   # 10 requests per window
+_BUCKET: Dict[str, List[float]] = {}
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,6 +40,18 @@ def check_token(provided: Optional[str]):
     if LABTOKEN and provided != LABTOKEN:
         raise HTTPException(status_code=401, detail="invalid token")
 
+def check_rate_limit(student_id: str):
+    now = time.time()
+    sid = (student_id or "").strip().lower()
+    if not sid:
+        raise HTTPException(status_code=400, detail="student_id required")
+    hits = _BUCKET.get(sid, [])
+    hits = [t for t in hits if (now - t) < RL_WINDOW_S]  # drop old
+    if len(hits) >= RL_MAX_HITS:
+        raise HTTPException(status_code=429, detail="Too many submissions; try again later.")
+    hits.append(now)
+    _BUCKET[sid] = hits
+
 ASSIGNMENT_ID = "ECSE322F25_HW4_OXIDATION"
 
 # ---------- Models ----------
@@ -42,11 +59,17 @@ Ambient = Literal["dry", "wet"]
 Orient  = Literal["100", "111"]
 
 class Run(BaseModel):
-    temp_C: int = Field(ge=900, le=1100)
+    temp_C: int = Field(ge=800, le=1200)  # broader range
     ambient: Ambient
     time_min: int = Field(ge=5, le=240)
     orientation: Orient
     preclean: bool
+
+    @validator("temp_C")
+    def temp_step(cls, v):
+        if v % 10 != 0:
+            raise ValueError("temp_C must be a multiple of 10 between 800 and 1200")
+        return v
 
 class Design(BaseModel):
     strategy: Literal["screening", "confirmation", "optimization"]
@@ -67,53 +90,73 @@ class ExperimentRequest(BaseModel):
 
 class ExperimentResponse(BaseModel):
     run_log: str
-    csv_base64: str
-    preview_plot_png_base64: str
+    csv_base64: str                     # per-run summary (center, edge, % nonuniformity)
+    map_csv_base64: str                 # 3×3 map per run
+    preview_plot_png_base64: str        # center thickness vs run (png)
     tech_note: str
     uid: str
 
-# ---------- Simulator helpers ----------
+# ---------- Deal–Grove parameters via Arrhenius ----------
+KB_eV_per_K = 8.617333262e-5
+
+# Pedagogical reference values (distinct from common slide sets).
+# Units: B_ref [um^2/min], BA_ref [um/min], Tref_C [°C], Ea [eV]
+DG_REF = {
+    "dry": {
+        "Tref_C": 1000,
+        "B_ref":   3.2e-4,   # um^2/min @ Tref
+        "BA_ref":  0.014,    # um/min  @ Tref
+        "Ea_B_eV": 1.15,     # activation energy for B
+        "Ea_BA_eV":2.05,     # activation energy for B/A
+    },
+    "wet": {
+        "Tref_C": 1000,
+        "B_ref":   2.8e-3,
+        "BA_ref":  0.110,
+        "Ea_B_eV": 0.75,
+        "Ea_BA_eV":1.45,
+    }
+}
+
+def _arrhenius(value_ref: float, Ea_eV: float, T_C: float, Tref_C: float) -> float:
+    T = 273.15 + float(T_C)
+    Tref = 273.15 + float(Tref_C)
+    return value_ref * math.exp(-Ea_eV/KB_eV_per_K * (1.0/T - 1.0/Tref))
+
+def dg_params_from_arrhenius(ambient: str, temp_C: int) -> tuple[float, float, float]:
+    """Return (A_um, B_um2_per_min, BA_um_per_min) using Arrhenius scaling."""
+    if ambient not in DG_REF:
+        raise HTTPException(400, detail=f"ambient must be 'dry' or 'wet'; got {ambient}")
+    ref = DG_REF[ambient]
+    B  = _arrhenius(ref["B_ref"],  ref["Ea_B_eV"],  temp_C, ref["Tref_C"])
+    BA = _arrhenius(ref["BA_ref"], ref["Ea_BA_eV"], temp_C, ref["Tref_C"])
+    BA = max(1e-9, BA)  # guard against division by ~0
+    A  = B / BA
+    return A, B, BA
+
+def deal_grove_thickness_nm(temp_C: int, ambient: str, time_min: int, x0_nm: float = 0.0) -> float:
+    """
+    Solve x^2 + A x = (x0^2 + A x0) + B t   for x (um), then return nm.
+    A and B are Arrhenius-scaled for the given ambient & T.
+    """
+    A_um, B_um2_per_min, _ = dg_params_from_arrhenius(ambient, temp_C)
+    x0_um = max(0.0, float(x0_nm)/1000.0)
+    rhs = x0_um*x0_um + A_um*x0_um + B_um2_per_min*float(time_min)
+    disc = A_um*A_um + 4.0*rhs
+    x_um = (-A_um + math.sqrt(max(0.0, disc))) / 2.0
+    return max(0.0, 1000.0*x_um)
 
 def get_rng(student_id: str) -> random.Random:
     seed = int(hashlib.sha256((student_id + ASSIGNMENT_ID).encode()).hexdigest(), 16) % (2**32)
     return random.Random(seed)
 
-def deal_grove_thickness_nm(temp_C: int, ambient: str, time_min: int, x0_nm: float = 0.0) -> float:
-    """
-    Deal–Grove-like toy model. Returns final oxide thickness (nm) after time_min,
-    starting from initial oxide x0_nm. Parameters are pedagogical and tunable.
-    Solves x^2 + A x = (x0^2 + A x0) + B t  for x (units: A [um], B [um^2/min]).
-    """
-    A_um = {
-        ('dry', 900): 0.080, ('dry', 1000): 0.070, ('dry', 1100): 0.060,
-        ('wet', 900): 0.040, ('wet', 1000): 0.035, ('wet', 1100): 0.030,
-    }
-    B_um2_per_min = {
-        ('dry', 900): 1.0e-4, ('dry', 1000): 2.0e-4, ('dry', 1100): 6.0e-4,
-        ('wet', 900): 6.0e-4, ('wet', 1000): 2.0e-3, ('wet', 1100): 5.0e-3,
-    }
-
-    key = (ambient, temp_C)
-    if key not in A_um or key not in B_um2_per_min:
-        raise HTTPException(
-            status_code=400,
-            detail=f"temp_C must be one of [900, 1000, 1100] and ambient in [dry, wet]; got temp_C={temp_C}, ambient={ambient}."
-        )
-
-    A = A_um[key]
-    B = B_um2_per_min[key]
-    x0_um = max(0.0, float(x0_nm) / 1000.0)
-    rhs = x0_um * x0_um + A * x0_um + B * float(time_min)
-    disc = A * A + 4.0 * rhs
-    x_um = (-A + math.sqrt(max(0.0, disc))) / 2.0
-    return max(0.0, 1000.0 * x_um)  # nm
-
 # ---------- Routes ----------
 @app.post("/run_experiments", response_model=ExperimentResponse)
 def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(None)):
     check_token(x_labtoken)
+    check_rate_limit(req.student_id)
 
-    # Optional initial oxide from target (e.g., pad oxide)
+    # Optional initial oxide (pad oxide) in nm
     x0_nm = 0.0
     if req.target and isinstance(req.target, dict) and "initial_oxide_nm" in req.target:
         try:
@@ -122,8 +165,12 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
             raise HTTPException(status_code=400, detail="target.initial_oxide_nm must be numeric if provided.")
 
     rng = get_rng(req.student_id)
+
     rows = [("run_id","temp_C","ambient","time_min","orientation","preclean",
              "thick_center_nm","thick_edge_nm","nonuniformity_pct")]
+    # 3×3 map table
+    map_rows = [("run_id","p00","p01","p02","p10","p11","p12","p20","p21","p22")]
+
     centers = []
 
     for i, r in enumerate(req.design.runs, start=1):
@@ -150,11 +197,27 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
                      round(center,1), round(edge,1), round(100*nonuni,1)))
         centers.append(center)
 
-    # CSV
-    buf = io.StringIO(); csv.writer(buf).writerows(rows)
+        # 3×3 map (radial thinning scaled by nonuniformity)
+        grid = [[0.0]*3 for _ in range(3)]
+        maxr = math.hypot(1,1)
+        for a in range(3):
+            for b in range(3):
+                rnorm = math.hypot(a-1, b-1) / maxr  # 0..1
+                shape = 0.6 + 0.4 * rnorm
+                grid[a][b] = max(0.0, center * (1 - nonuni * shape))
+        map_rows.append((i, *[round(grid[a][b],1) for a in range(3) for b in range(3)]))
+
+    # Summary CSV
+    buf = io.StringIO(newline="")
+    csv.writer(buf).writerows(rows)
     csv_b64 = base64.b64encode(buf.getvalue().encode()).decode()
 
-    # Plot
+    # Map CSV
+    mbuf = io.StringIO(newline="")
+    csv.writer(mbuf).writerows(map_rows)
+    map_csv_b64 = base64.b64encode(mbuf.getvalue().encode()).decode()
+
+    # Plot (center thickness vs run)
     plt.figure()
     plt.plot(range(1, len(centers)+1), centers, marker="o")
     plt.xlabel("Run"); plt.ylabel("Center thickness (nm)")
@@ -163,46 +226,63 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
     img = io.BytesIO(); plt.savefig(img, format="png"); plt.close()
     png_b64 = base64.b64encode(img.getvalue()).decode()
 
-    # Log
+    # ---- Logging (file + Render logs) ----
     stamp = datetime.datetime.now().isoformat()
-    line = f"{stamp},{req.student_id},{len(req.design.runs)},{json.dumps(req.target)}\n"
-    print(f"[SUBMISSION] {line.strip()}")
-    if not os.path.exists(LOG_PATH):
-        with open(LOG_PATH, "w", encoding="utf-8") as f:
-            f.write("timestamp,student_id,n_runs,target\n")
-    with open(LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(line)
+    record = {
+        "timestamp": stamp,
+        "student_id": req.student_id,
+        "n_runs": len(req.design.runs),
+        "target": req.target
+    }
+    print(f"[SUBMISSION] {json.dumps(record, separators=(',',':'))}")
+
+    # Write CSV robustly (create header if missing)
+    header = ["timestamp","student_id","n_runs","target_json"]
+    need_header = not os.path.exists(LOG_PATH)
+    with open(LOG_PATH, "a", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        if need_header:
+            w.writerow(header)
+        w.writerow([stamp, req.student_id, len(req.design.runs), json.dumps(req.target)])
 
     note = (
-        "Runs completed. Thickness increases with temperature/time; wet grows faster. "
-        "Uniformity is typically worse for wet. Consider a confirmation near target and a uniformity check."
+        "Runs completed. Thickness increases with temperature and time; wet grows faster. "
+        "Edge regions tend to be thinner; wet usually shows higher nonuniformity. "
+        "Consider a confirmation near target and a uniformity check."
     )
     uid = f"{req.student_id}-{int(time.time())}"
 
     return ExperimentResponse(
         run_log=f"Processed {len(req.design.runs)} run(s).",
         csv_base64=csv_b64,
+        map_csv_base64=map_csv_b64,
         preview_plot_png_base64=png_b64,
         tech_note=note,
         uid=uid
     )
 
+# ---------- Admin (view logs) ----------
 @app.get("/admin/log")
 def get_log(x_labtoken: Optional[str] = Header(None), token: Optional[str] = None):
     check_token(x_labtoken or token)
     if not os.path.exists(LOG_PATH):
-        return PlainTextResponse("timestamp,student_id,n_runs,target\n", media_type="text/csv")
+        return PlainTextResponse("timestamp,student_id,n_runs,target_json\n", media_type="text/csv")
     with open(LOG_PATH, "r", encoding="utf-8") as f:
         return PlainTextResponse(f.read(), media_type="text/csv")
 
 @app.get("/admin/stats")
 def stats(x_labtoken: Optional[str] = Header(None), token: Optional[str] = None):
     check_token(x_labtoken or token)
-    counts = {}
+    counts: Dict[str, int] = {}
+    total = 0
     if os.path.exists(LOG_PATH):
         with open(LOG_PATH, "r", encoding="utf-8") as f:
-            next(f, None)
-            for line in f:
-                _, sid, _, _ = line.rstrip("\n").split(",", 4)
+            r = csv.reader(f)
+            next(r, None)  # skip header
+            for row in r:
+                if not row: 
+                    continue
+                sid = row[1]
                 counts[sid] = counts.get(sid, 0) + 1
-    return JSONResponse({"by_student": counts, "total": sum(counts.values())})
+                total += 1
+    return JSONResponse({"by_student": counts, "total": total})
