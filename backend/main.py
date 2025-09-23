@@ -12,20 +12,21 @@ from matplotlib import pyplot as plt
 # ---------- App & settings ----------
 app = FastAPI(title="Oxidation Technician")
 
-ALLOWED   = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-LABTOKEN  = os.getenv("LABTOKEN", "")
-
-# Logs: persist to /data if you add a Render Disk, else current dir
-LOG_DIR  = "/data" if os.path.isdir("/data") else "."
-LOG_PATH = os.path.join(LOG_DIR, "submissions_log.csv")
+ALLOWED  = [o.strip() for o in os.getenv("ALLOWED_ORIGINS","").split(",") if o.strip()]
+LABTOKEN = os.getenv("LABTOKEN","")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED or ["https://microchip-fabrication-tech.onrender.com"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],  # important: covers x-labtoken, content-type, etc.
+    allow_headers=["*"],
 )
+
+# Logs: persist to /data if you add a Render Disk, else current dir
+LOG_DIR  = "/data" if os.path.isdir("/data") else "."
+LOG_PATH = os.path.join(LOG_DIR, "submissions_log.csv")
+
 
 @app.get("/health")
 def health():
@@ -199,5 +200,6 @@ def stats(x_labtoken: Optional[str] = Header(None), token: Optional[str] = None)
                 _, sid, _, _ = line.rstrip("\n").split(",", 4)
                 counts[sid] = counts.get(sid, 0) + 1
     return JSONResponse({"by_student": counts, "total": sum(counts.values())})
+
 
 
