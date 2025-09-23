@@ -4,6 +4,7 @@ from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel, Field, validator
 from typing import List, Literal, Optional, Dict, Tuple
 import hashlib, io, base64, csv, math, random, time, os, json, datetime
+import numpy as np
 
 import matplotlib
 matplotlib.use("Agg")
@@ -59,12 +60,11 @@ Ambient = Literal["dry", "wet"]
 Orient  = Literal["100", "111"]
 
 class Run(BaseModel):
-    temp_C: int = Field(ge=800, le=1200)  # broader range
+    temp_C: int = Field(ge=800, le=1200)
     ambient: Ambient
     time_min: int = Field(ge=5, le=240)
     orientation: Orient
     preclean: bool
-
     @validator("temp_C")
     def temp_step(cls, v):
         if v % 10 != 0:
@@ -92,30 +92,19 @@ class ExperimentResponse(BaseModel):
     run_log: str
     csv_base64: str                     # per-run summary (center, edge, % nonuniformity)
     map_csv_base64: str                 # 3×3 map per run
-    preview_plot_png_base64: str        # center thickness vs run (png)
+    preview_plot_png_base64: str        # center thickness vs run
+    wafer_maps_png_base64: str          # composite wafer heatmaps (all runs)
     tech_note: str
     uid: str
 
-# ---------- Deal–Grove parameters via Arrhenius ----------
-KB_eV_per_K = 8.617333262e-5
+# ---------- Deal–Grove via Arrhenius ----------
+KB_eV_per_K = 8.617333262e-5  # Boltzmann (eV/K)
 
-# Pedagogical reference values (distinct from common slide sets).
+# Distinct pedagogical reference values (not from the slide)
 # Units: B_ref [um^2/min], BA_ref [um/min], Tref_C [°C], Ea [eV]
 DG_REF = {
-    "dry": {
-        "Tref_C": 1000,
-        "B_ref":   3.2e-4,   # um^2/min @ Tref
-        "BA_ref":  0.014,    # um/min  @ Tref
-        "Ea_B_eV": 1.15,     # activation energy for B
-        "Ea_BA_eV":2.05,     # activation energy for B/A
-    },
-    "wet": {
-        "Tref_C": 1000,
-        "B_ref":   2.8e-3,
-        "BA_ref":  0.110,
-        "Ea_B_eV": 0.75,
-        "Ea_BA_eV":1.45,
-    }
+    "dry": {"Tref_C": 1000, "B_ref": 3.2e-4, "BA_ref": 0.014, "Ea_B_eV": 1.15, "Ea_BA_eV": 2.05},
+    "wet": {"Tref_C": 1000, "B_ref": 2.8e-3, "BA_ref": 0.110, "Ea_B_eV": 0.75, "Ea_BA_eV": 1.45},
 }
 
 def _arrhenius(value_ref: float, Ea_eV: float, T_C: float, Tref_C: float) -> float:
@@ -123,21 +112,20 @@ def _arrhenius(value_ref: float, Ea_eV: float, T_C: float, Tref_C: float) -> flo
     Tref = 273.15 + float(Tref_C)
     return value_ref * math.exp(-Ea_eV/KB_eV_per_K * (1.0/T - 1.0/Tref))
 
-def dg_params_from_arrhenius(ambient: str, temp_C: int) -> tuple[float, float, float]:
+def dg_params_from_arrhenius(ambient: str, temp_C: int) -> Tuple[float, float, float]:
     """Return (A_um, B_um2_per_min, BA_um_per_min) using Arrhenius scaling."""
     if ambient not in DG_REF:
         raise HTTPException(400, detail=f"ambient must be 'dry' or 'wet'; got {ambient}")
     ref = DG_REF[ambient]
     B  = _arrhenius(ref["B_ref"],  ref["Ea_B_eV"],  temp_C, ref["Tref_C"])
     BA = _arrhenius(ref["BA_ref"], ref["Ea_BA_eV"], temp_C, ref["Tref_C"])
-    BA = max(1e-9, BA)  # guard against division by ~0
+    BA = max(1e-9, BA)  # guard
     A  = B / BA
     return A, B, BA
 
 def deal_grove_thickness_nm(temp_C: int, ambient: str, time_min: int, x0_nm: float = 0.0) -> float:
     """
     Solve x^2 + A x = (x0^2 + A x0) + B t   for x (um), then return nm.
-    A and B are Arrhenius-scaled for the given ambient & T.
     """
     A_um, B_um2_per_min, _ = dg_params_from_arrhenius(ambient, temp_C)
     x0_um = max(0.0, float(x0_nm)/1000.0)
@@ -150,13 +138,13 @@ def get_rng(student_id: str) -> random.Random:
     seed = int(hashlib.sha256((student_id + ASSIGNMENT_ID).encode()).hexdigest(), 16) % (2**32)
     return random.Random(seed)
 
-# ---------- Routes ----------
+# ---------- Route ----------
 @app.post("/run_experiments", response_model=ExperimentResponse)
 def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(None)):
     check_token(x_labtoken)
     check_rate_limit(req.student_id)
 
-    # Optional initial oxide (pad oxide) in nm
+    # Optional initial oxide (pad oxide)
     x0_nm = 0.0
     if req.target and isinstance(req.target, dict) and "initial_oxide_nm" in req.target:
         try:
@@ -168,10 +156,9 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
 
     rows = [("run_id","temp_C","ambient","time_min","orientation","preclean",
              "thick_center_nm","thick_edge_nm","nonuniformity_pct")]
-    # 3×3 map table
     map_rows = [("run_id","p00","p01","p02","p10","p11","p12","p20","p21","p22")]
-
-    centers = []
+    map_arrays: List[np.ndarray] = []
+    centers: List[float] = []
 
     for i, r in enumerate(req.design.runs, start=1):
         # Deal–Grove base (nm)
@@ -198,14 +185,15 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
         centers.append(center)
 
         # 3×3 map (radial thinning scaled by nonuniformity)
-        grid = [[0.0]*3 for _ in range(3)]
+        grid = np.zeros((3,3), dtype=float)
         maxr = math.hypot(1,1)
         for a in range(3):
             for b in range(3):
                 rnorm = math.hypot(a-1, b-1) / maxr  # 0..1
                 shape = 0.6 + 0.4 * rnorm
-                grid[a][b] = max(0.0, center * (1 - nonuni * shape))
-        map_rows.append((i, *[round(grid[a][b],1) for a in range(3) for b in range(3)]))
+                grid[a, b] = max(0.0, center * (1 - nonuni * shape))
+        map_arrays.append(grid)
+        map_rows.append((i, *[round(grid[a,b],1) for a in range(3) for b in range(3)]))
 
     # Summary CSV
     buf = io.StringIO(newline="")
@@ -216,6 +204,35 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
     mbuf = io.StringIO(newline="")
     csv.writer(mbuf).writerows(map_rows)
     map_csv_b64 = base64.b64encode(mbuf.getvalue().encode()).decode()
+
+    # Composite wafer-map PNG (heatmaps per run)
+    wafer_maps_png_base64 = ""
+    if map_arrays:
+        n = len(map_arrays)
+        cols = min(4, n)
+        rows_fig = math.ceil(n / cols)
+        fig, axes = plt.subplots(rows_fig, cols, figsize=(3.2*cols, 3.2*rows_fig))
+        axes = np.atleast_2d(axes)
+        vmin = min(a.min() for a in map_arrays)
+        vmax = max(a.max() for a in map_arrays)
+        im = None
+        for idx, arr in enumerate(map_arrays):
+            r, c = divmod(idx, cols)
+            ax = axes[r, c]
+            im = ax.imshow(arr, origin="lower", vmin=vmin, vmax=vmax)
+            ax.set_title(f"Run {idx+1}")
+            ax.set_xticks([]); ax.set_yticks([])
+        # hide unused subplots
+        for j in range(n, rows_fig*cols):
+            axes[j//cols, j%cols].axis("off")
+        fig.subplots_adjust(right=0.88, wspace=0.25, hspace=0.35)
+        if im is not None:
+            cax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
+            fig.colorbar(im, cax=cax, label="Thickness (nm)")
+        buf_img = io.BytesIO()
+        fig.savefig(buf_img, format="png", dpi=150)
+        plt.close(fig)
+        wafer_maps_png_base64 = base64.b64encode(buf_img.getvalue()).decode()
 
     # Plot (center thickness vs run)
     plt.figure()
@@ -236,7 +253,6 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
     }
     print(f"[SUBMISSION] {json.dumps(record, separators=(',',':'))}")
 
-    # Write CSV robustly (create header if missing)
     header = ["timestamp","student_id","n_runs","target_json"]
     need_header = not os.path.exists(LOG_PATH)
     with open(LOG_PATH, "a", encoding="utf-8", newline="") as f:
@@ -257,6 +273,7 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
         csv_base64=csv_b64,
         map_csv_base64=map_csv_b64,
         preview_plot_png_base64=png_b64,
+        wafer_maps_png_base64=wafer_maps_png_base64,
         tech_note=note,
         uid=uid
     )
@@ -278,10 +295,9 @@ def stats(x_labtoken: Optional[str] = Header(None), token: Optional[str] = None)
     if os.path.exists(LOG_PATH):
         with open(LOG_PATH, "r", encoding="utf-8") as f:
             r = csv.reader(f)
-            next(r, None)  # skip header
+            next(r, None)
             for row in r:
-                if not row: 
-                    continue
+                if not row: continue
                 sid = row[1]
                 counts[sid] = counts.get(sid, 0) + 1
                 total += 1
