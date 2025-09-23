@@ -1,69 +1,22 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Virtual Oxidation Technician</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body { font: 16px/1.4 system-ui, sans-serif; margin: 2rem; max-width: 900px; }
-    textarea, input, button { width: 100%; box-sizing: border-box; margin: 0.5rem 0; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-    pre { background: #f6f8fa; padding: 0.75rem; overflow: auto; }
-    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 1rem; margin-top: 1rem; }
-  </style>
-</head>
-<body>
-  <h1>Virtual Oxidation Technician</h1>
-  <p>Submit your DOE as JSON. You’ll receive a CSV and preview plot.</p>
-
-  <div class="card">
-    <h3>JSON Template</h3>
-    <pre>{
-  "objective": "Hit 100 nm with minimal nonuniformity",
-  "target": {"thickness_nm": 100, "tolerance_nm": 5},
-  "design": {
-    "strategy": "screening",
-    "runs": [
-      {"temp_C": 1000, "ambient": "dry", "time_min": 60, "orientation": "100", "preclean": true},
-      {"temp_C": 1000, "ambient": "wet", "time_min": 20, "orientation": "100", "preclean": true}
-    ]
-  },
-  "notes": "Budget: ≤ 3 runs today",
-  "student_id": "abc123",
-  "section": "ECSE 322/415 F25"
-}</pre>
-  </div>
-
-  <label for="json">Your DOE JSON</label>
-  <textarea id="json" rows="16"></textarea>
-
-  <div class="row">
-    <button id="submit">Run Experiments</button>
-    <button id="fill">Fill Example</button>
-  </div>
-
-  <div id="result" class="card" style="display:none;">
-    <h3>Results</h3>
-    <p id="log"></p>
-    <img id="plot" alt="Preview plot" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 8px;" />
-    <div class="row">
-      <button id="downloadCsv">Download CSV</button>
-      <button id="copyNote">Copy Tech Note</button>
-    </div>
-    <pre id="note"></pre>
-  </div>
-
 <script>
-const API = "https://oxidation-api.onrender.com/run_experiments";
-const TOKEN = "Oxide!2025!HW4"; // must match LABTOKEN on Render
+/* ====== CONFIG ====== */
+const API   = "https://oxidation-api.onrender.com/run_experiments";  // your backend URL
+const TOKEN = "Oxide!2025!HW4";  // <- MUST equal LABTOKEN on the backend; set "" if you removed LABTOKEN
 
-const $ = sel => document.querySelector(sel);
+/* ====== UTIL ====== */
+const $ = (sel) => document.querySelector(sel);
+function dl(name, href) {
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = name;
+  a.click();
+}
 
-// (Optional) preload the textbox with the template
-$("#fill").onclick = () => {
-  $("#json").value = `{
+/* ====== PREFILL / REMEMBER LAST ====== */
+const box = $("#json");
+const example = `{
   "objective": "Hit 100 nm with minimal nonuniformity",
-  "target": {"thickness_nm": 100, "tolerance_nm": 5},
+  "target": {"thickness_nm": 100, "tolerance_nm": 5, "initial_oxide_nm": 0},
   "design": {
     "strategy": "screening",
     "runs": [
@@ -75,56 +28,111 @@ $("#fill").onclick = () => {
   "student_id": "abc123",
   "section": "ECSE 322/415 F25"
 }`;
-};
+$("#fill").onclick = () => { box.value = example; };
+box.value = localStorage.getItem("lastDOE") || box.value || example;
 
+/* ====== RUN ====== */
 $("#submit").onclick = async () => {
+  // Parse JSON
   let payload;
+  try { payload = JSON.parse(box.value); }
+  catch { alert("Invalid JSON. Fix and try again."); return; }
+
+  // Remember last JSON
+  localStorage.setItem("lastDOE", box.value);
+
+  // Build headers
+  const headers = { "Content-Type": "application/json" };
+  if (TOKEN && TOKEN.length) headers["x-labtoken"] = TOKEN;
+
+  // Call API
+  let res, text;
   try {
-    payload = JSON.parse($("#json").value);
-  } catch {
-    alert("Invalid JSON. Please fix and try again.");
-    return;
+    res = await fetch(API, { method: "POST", headers, body: JSON.stringify(payload) });
+    text = await res.text();
+  } catch (e) {
+    alert("Network error: " + e); return;
   }
 
-  // IMPORTANT: include the token header
-  const res = await fetch(API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-labtoken": TOKEN
-    },
-    body: JSON.stringify(payload)
-  });
-
-  const text = await res.text();
   if (!res.ok) {
-    alert(`Error ${res.status}:\n${text}`);
+    if (res.status === 401) {
+      alert("401 invalid token.\nMake sure TOKEN in the page matches LABTOKEN on the backend.");
+    } else if (res.status === 429) {
+      alert("Rate limit: too many submissions. Try again later.");
+    } else {
+      alert(`Error ${res.status}:\n${text}`);
+    }
     return;
   }
 
-  const data = JSON.parse(text);
+  // Parse data
+  let data;
+  try { data = JSON.parse(text); } catch { alert("Bad JSON from server."); return; }
+
+  // Reveal result area
   $("#result").style.display = "block";
-  $("#log").textContent = data.run_log + "  (Result ID: " + data.uid + ")";
-  $("#plot").src = "data:image/png;base64," + data.preview_plot_png_base64;
+  $("#log").textContent  = `${data.run_log}  (Result ID: ${data.uid})`;
   $("#note").textContent = data.tech_note;
 
-  // CSV download
+  // Line plot
+  $("#plot").src = "data:image/png;base64," + (data.preview_plot_png_base64 || "");
+
+  // Download CSV (summary)
   $("#downloadCsv").onclick = () => {
-    const a = document.createElement("a");
-    a.href = "data:text/csv;base64," + data.csv_base64;
-    a.download = "oxidation_results.csv";
-    a.click();
+    dl("oxidation_results.csv", "data:text/csv;base64," + (data.csv_base64 || ""));
   };
 
-  $("#copyNote").onclick = async () => {
-    await navigator.clipboard.writeText(data.tech_note);
+  // Download 3×3 Map CSV (create button once if missing)
+  if (!document.getElementById("downloadMapCsv")) {
+    const btn = document.createElement("button");
+    btn.id = "downloadMapCsv";
+    btn.textContent = "Download 3×3 Map CSV";
+    btn.style.width = "100%";
+    document.querySelector("#result .row").appendChild(btn);
+  }
+  document.getElementById("downloadMapCsv").onclick = () => {
+    dl("oxidation_wafer_maps.csv", "data:text/csv;base64," + (data.map_csv_base64 || ""));
   };
+
+  // Download Plot PNG (create once)
+  if (!document.getElementById("downloadPlot")) {
+    const btn = document.createElement("button");
+    btn.id = "downloadPlot";
+    btn.textContent = "Download Plot";
+    btn.style.width = "100%";
+    document.querySelector("#result .row").appendChild(btn);
+  }
+  document.getElementById("downloadPlot").onclick = () => {
+    dl("center_thickness_plot.png", "data:image/png;base64," + (data.preview_plot_png_base64 || ""));
+  };
+
+  // Wafer-map image (composite heatmaps) + download
+  if (data.wafer_maps_png_base64) {
+    let img = document.getElementById("waferMapsImg");
+    if (!img) {
+      img = document.createElement("img");
+      img.id = "waferMapsImg";
+      img.style.maxWidth = "100%";
+      img.style.border = "1px solid #ddd";
+      img.style.borderRadius = "8px";
+      img.style.marginTop = "12px";
+      document.getElementById("result").appendChild(img);
+    }
+    img.src = "data:image/png;base64," + data.wafer_maps_png_base64;
+
+    if (!document.getElementById("downloadWaferMaps")) {
+      const btn = document.createElement("button");
+      btn.id = "downloadWaferMaps";
+      btn.textContent = "Download Wafer Maps PNG";
+      btn.style.width = "100%";
+      document.querySelector("#result .row").appendChild(btn);
+    }
+    document.getElementById("downloadWaferMaps").onclick = () => {
+      dl("wafer_maps.png", "data:image/png;base64," + data.wafer_maps_png_base64);
+    };
+  }
+
+  // Copy note
+  $("#copyNote").onclick = async () => { await navigator.clipboard.writeText(data.tech_note || ""); };
 };
 </script>
-
-</body>
-</html>
-
-
-
-
