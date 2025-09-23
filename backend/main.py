@@ -131,4 +131,34 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(line)
 
-    note = ("Runs completed. Thickness increases with temperature/time; wet grows faster
+    note = ("Runs completed. Thickness increases with temperature/time; wet grows faster. "
+            "Uniformity is typically worse for wet. Consider a confirmation near target and a uniformity check.")
+    uid = f"{req.student_id}-{int(time.time())}"
+
+    return ExperimentResponse(
+        run_log=f"Processed {len(req.design.runs)} run(s).",
+        csv_base64=csv_b64,
+        preview_plot_png_base64=png_b64,
+        tech_note=note,
+        uid=uid
+    )
+
+@app.get("/admin/log")
+def get_log(x_labtoken: Optional[str] = Header(None), token: Optional[str] = None):
+    check_token(x_labtoken or token)
+    if not os.path.exists(LOG_PATH):
+        return PlainTextResponse("timestamp,student_id,n_runs,target\n", media_type="text/csv")
+    with open(LOG_PATH, "r", encoding="utf-8") as f:
+        return PlainTextResponse(f.read(), media_type="text/csv")
+
+@app.get("/admin/stats")
+def stats(x_labtoken: Optional[str] = Header(None), token: Optional[str] = None):
+    check_token(x_labtoken or token)
+    counts = {}
+    if os.path.exists(LOG_PATH):
+        with open(LOG_PATH, "r", encoding="utf-8") as f:
+            next(f, None)
+            for line in f:
+                _, sid, _, _ = line.rstrip("\n").split(",", 4)
+                counts[sid] = counts.get(sid, 0) + 1
+    return JSONResponse({"by_student": counts, "total": sum(counts.values())})
