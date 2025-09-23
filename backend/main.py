@@ -249,15 +249,16 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
         plt.close(fig)
         wafer_maps_png_base64 = base64.b64encode(buf_img.getvalue()).decode()
 
-    # Plot (center thickness vs run) — BAR plot
+
+    # Plot (center thickness vs run)
     plt.figure()
-    x = np.arange(1, len(centers)+1)
-    plt.bar(x, centers)
+    plt.plot(range(1, len(centers)+1), centers, marker="o")
     plt.xlabel("Run"); plt.ylabel("Center thickness (nm)")
     plt.title("Oxide Growth — Center Thickness")
     plt.tight_layout()
     img = io.BytesIO(); plt.savefig(img, format="png"); plt.close()
     png_b64 = base64.b64encode(img.getvalue()).decode()
+
 
     # ---- Logging (file + Render logs) ----
     stamp = datetime.datetime.now().isoformat()
@@ -318,3 +319,4 @@ def stats(x_labtoken: Optional[str] = Header(None), token: Optional[str] = None)
                 counts[sid] = counts.get(sid, 0) + 1
                 total += 1
     return JSONResponse({"by_student": counts, "total": total})
+
