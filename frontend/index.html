@@ -1,16 +1,11 @@
 <script>
 /* ====== CONFIG ====== */
-const API   = "https://oxidation-api.onrender.com/run_experiments";  // your backend URL
-const TOKEN = "Oxide!2025!HW4";  // <- MUST equal LABTOKEN on the backend; set "" if you removed LABTOKEN
+const API   = "https://oxidation-api.onrender.com/run_experiments";  // backend URL
+const TOKEN = "Oxide!2025!HW4";  // MUST equal LABTOKEN in Render; set "" to omit header
 
 /* ====== UTIL ====== */
 const $ = (sel) => document.querySelector(sel);
-function dl(name, href) {
-  const a = document.createElement("a");
-  a.href = href;
-  a.download = name;
-  a.click();
-}
+function dl(name, href) { const a = document.createElement("a"); a.href = href; a.download = name; a.click(); }
 
 /* ====== PREFILL / REMEMBER LAST ====== */
 const box = $("#json");
@@ -43,68 +38,55 @@ $("#submit").onclick = async () => {
 
   // Build headers
   const headers = { "Content-Type": "application/json" };
-  if (TOKEN && TOKEN.length) headers["x-labtoken"] = TOKEN;
+  if (TOKEN) headers["x-labtoken"] = TOKEN;
 
   // Call API
   let res, text;
   try {
-    res = await fetch(API, { method: "POST", headers, body: JSON.stringify(payload) });
-    text = await res.text();
-  } catch (e) {
-    alert("Network error: " + e); return;
-  }
+    res  = await fetch(API, { method: "POST", headers, body: JSON.stringify(payload) });
+    text = await res.text();  // read once
+  } catch (e) { alert("Network error: " + e); return; }
 
   if (!res.ok) {
-    if (res.status === 401) {
-      alert("401 invalid token.\nMake sure TOKEN in the page matches LABTOKEN on the backend.");
-    } else if (res.status === 429) {
-      alert("Rate limit: too many submissions. Try again later.");
-    } else {
-      alert(`Error ${res.status}:\n${text}`);
-    }
+    if (res.status === 401) alert("401 invalid token. TOKEN must match LABTOKEN on the backend.");
+    else if (res.status === 429) alert("Rate limit: too many submissions. Try again later.");
+    else alert(`Error ${res.status}:\n${text}`);
     return;
   }
 
-  // Parse data
+  // Parse response JSON
   let data;
   try { data = JSON.parse(text); } catch { alert("Bad JSON from server."); return; }
 
-  // Reveal result area
+  // Show results
   $("#result").style.display = "block";
   $("#log").textContent  = `${data.run_log}  (Result ID: ${data.uid})`;
-  $("#note").textContent = data.tech_note;
+  $("#note").textContent = data.tech_note || "";
 
   // Line plot
   $("#plot").src = "data:image/png;base64," + (data.preview_plot_png_base64 || "");
 
   // Download CSV (summary)
-  $("#downloadCsv").onclick = () => {
+  $("#downloadCsv").onclick = () =>
     dl("oxidation_results.csv", "data:text/csv;base64," + (data.csv_base64 || ""));
-  };
 
-  // Download 3×3 Map CSV (create button once if missing)
+  // 3×3 Map CSV (add button once)
   if (!document.getElementById("downloadMapCsv")) {
     const btn = document.createElement("button");
-    btn.id = "downloadMapCsv";
-    btn.textContent = "Download 3×3 Map CSV";
-    btn.style.width = "100%";
+    btn.id = "downloadMapCsv"; btn.textContent = "Download 3×3 Map CSV"; btn.style.width = "100%";
     document.querySelector("#result .row").appendChild(btn);
   }
-  document.getElementById("downloadMapCsv").onclick = () => {
+  document.getElementById("downloadMapCsv").onclick = () =>
     dl("oxidation_wafer_maps.csv", "data:text/csv;base64," + (data.map_csv_base64 || ""));
-  };
 
-  // Download Plot PNG (create once)
+  // Download plot PNG (add once)
   if (!document.getElementById("downloadPlot")) {
     const btn = document.createElement("button");
-    btn.id = "downloadPlot";
-    btn.textContent = "Download Plot";
-    btn.style.width = "100%";
+    btn.id = "downloadPlot"; btn.textContent = "Download Plot"; btn.style.width = "100%";
     document.querySelector("#result .row").appendChild(btn);
   }
-  document.getElementById("downloadPlot").onclick = () => {
+  document.getElementById("downloadPlot").onclick = () =>
     dl("center_thickness_plot.png", "data:image/png;base64," + (data.preview_plot_png_base64 || ""));
-  };
 
   // Wafer-map image (composite heatmaps) + download
   if (data.wafer_maps_png_base64) {
@@ -112,24 +94,19 @@ $("#submit").onclick = async () => {
     if (!img) {
       img = document.createElement("img");
       img.id = "waferMapsImg";
-      img.style.maxWidth = "100%";
-      img.style.border = "1px solid #ddd";
-      img.style.borderRadius = "8px";
-      img.style.marginTop = "12px";
+      img.style.maxWidth = "100%"; img.style.border = "1px solid #ddd";
+      img.style.borderRadius = "8px"; img.style.marginTop = "12px";
       document.getElementById("result").appendChild(img);
     }
     img.src = "data:image/png;base64," + data.wafer_maps_png_base64;
 
     if (!document.getElementById("downloadWaferMaps")) {
       const btn = document.createElement("button");
-      btn.id = "downloadWaferMaps";
-      btn.textContent = "Download Wafer Maps PNG";
-      btn.style.width = "100%";
+      btn.id = "downloadWaferMaps"; btn.textContent = "Download Wafer Maps PNG"; btn.style.width = "100%";
       document.querySelector("#result .row").appendChild(btn);
     }
-    document.getElementById("downloadWaferMaps").onclick = () => {
+    document.getElementById("downloadWaferMaps").onclick = () =>
       dl("wafer_maps.png", "data:image/png;base64," + data.wafer_maps_png_base64);
-    };
   }
 
   // Copy note
