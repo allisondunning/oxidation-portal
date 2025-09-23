@@ -171,9 +171,7 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
 
     rows = [("run_id","temp_C","ambient","time_min","orientation","preclean",
              "thick_center_nm","thick_edge_nm","nonuniformity_pct")]
-    # 5×5 wafer map header
-    map_rows = [tuple(["run_id"] + [f"p{a}{b}" for a in range(5) for b in range(5)])]
-
+    map_rows = [("run_id","p00","p01","p02","p10","p11","p12","p20","p21","p22")]
     map_arrays: List[np.ndarray] = []
     centers: List[float] = []
 
@@ -201,30 +199,16 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
                      round(center,1), round(edge,1), round(100*nonuni,1)))
         centers.append(center)
 
-        # 5×5 map (radial thinning) with circular wafer mask (corners cut off)
-        grid = np.zeros((5,5), dtype=float)
-        mask = np.zeros((5,5), dtype=bool)
-        maxr = math.hypot(2, 2)  # distance from center (2,2) to a corner
-        
-        for a in range(5):
-            for b in range(5):
-                rnorm = math.hypot(a-2, b-2) / maxr  # 0..1 at center..corner
-                if rnorm >= 1.0 - 1e-12:             # outside wafer edge -> mask
-                    mask[a, b] = True
-                    grid[a, b] = np.nan              # NaNs render transparent in the image
-                else:
-                    shape = 0.6 + 0.4 * rnorm        # edge a bit thinner
-                    grid[a, b] = max(0.0, center * (1 - nonuni * shape))
-        
-        map_arrays.append(np.array(grid, dtype=float))
-        
-        # CSV row (masked cells blank)
-        flat = []
-        for a in range(5):
-            for b in range(5):
-                val = "" if np.isnan(grid[a, b]) else round(grid[a, b], 1)
-                flat.append(val)
-        map_rows.append(tuple([i] + flat))
+        # 3×3 map (radial thinning scaled by nonuniformity)
+        grid = np.zeros((3,3), dtype=float)
+        maxr = math.hypot(1,1)
+        for a in range(3):
+            for b in range(3):
+                rnorm = math.hypot(a-1, b-1) / maxr  # 0..1
+                shape = 0.6 + 0.4 * rnorm
+                grid[a, b] = max(0.0, center * (1 - nonuni * shape))
+        map_arrays.append(grid)
+        map_rows.append((i, *[round(grid[a,b],1) for a in range(3) for b in range(3)]))
 
     # Summary CSV
     buf = io.StringIO(newline="")
@@ -236,7 +220,6 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
     csv.writer(mbuf).writerows(map_rows)
     map_csv_b64 = base64.b64encode(mbuf.getvalue().encode()).decode()
 
-
     # Composite wafer-map PNG (heatmaps per run)
     wafer_maps_png_base64 = ""
     if map_arrays:
@@ -245,22 +228,15 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
         rows_fig = math.ceil(n / cols)
         fig, axes = plt.subplots(rows_fig, cols, figsize=(3.2*cols, 3.2*rows_fig))
         axes = np.atleast_2d(axes)
-    
-        # NaN-aware color limits and transparent NaNs
-        vmin = min(np.nanmin(a) for a in map_arrays)
-        vmax = max(np.nanmax(a) for a in map_arrays)
-        cm = plt.cm.get_cmap("viridis").copy()
-        cm.set_bad(alpha=0.0)  # NaNs/corners invisible
-    
+        vmin = min(a.min() for a in map_arrays)
+        vmax = max(a.max() for a in map_arrays)
         im = None
         for idx, arr in enumerate(map_arrays):
             r, c = divmod(idx, cols)
             ax = axes[r, c]
-            im = ax.imshow(arr, origin="lower", vmin=vmin, vmax=vmax, cmap=cm)
+            im = ax.imshow(arr, origin="lower", vmin=vmin, vmax=vmax)
             ax.set_title(f"Run {idx+1}")
             ax.set_xticks([]); ax.set_yticks([])
-        # (keep the rest of this block as-is: hiding unused subplots, colorbar, save to PNG)
-
         # hide unused subplots
         for j in range(n, rows_fig*cols):
             axes[j//cols, j%cols].axis("off")
@@ -342,4 +318,3 @@ def stats(x_labtoken: Optional[str] = Header(None), token: Optional[str] = None)
                 counts[sid] = counts.get(sid, 0) + 1
                 total += 1
     return JSONResponse({"by_student": counts, "total": total})
-
