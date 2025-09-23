@@ -119,7 +119,7 @@ KB_eV_per_K = 8.617333262e-5  # Boltzmann (eV/K)
 # Units: B_ref [um^2/min], BA_ref [um/min], Tref_C [°C], Ea [eV]
 DG_REF = {
     "dry": {"Tref_C": 1000, "B_ref": 3.2e-4, "BA_ref": 0.014, "Ea_B_eV": 1.15, "Ea_BA_eV": 2.05},
-    "wet": {"Tref_C": 1000, "B_ref": 2.8e-3, "BA_ref": 0.110, "Ea_B_eV": 0.75, "Ea_BA_eV": 1.45},
+    "wet": {"Tref_C": 1000, "B_ref": 6.2, "BA_ref": 162000, "Ea_B_eV": 0.75, "Ea_BA_eV": 1.45},
 }
 
 def _arrhenius(value_ref: float, Ea_eV: float, T_C: float, Tref_C: float) -> float:
@@ -319,4 +319,5 @@ def stats(x_labtoken: Optional[str] = Header(None), token: Optional[str] = None)
                 counts[sid] = counts.get(sid, 0) + 1
                 total += 1
     return JSONResponse({"by_student": counts, "total": total})
+
 
