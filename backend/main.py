@@ -12,8 +12,8 @@ from matplotlib import pyplot as plt
 # ---------- App & settings ----------
 app = FastAPI(title="Oxidation Technician")
 
-ALLOWED   = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-LABTOKEN  = os.getenv("LABTOKEN", "")
+ALLOWED  = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+LABTOKEN = os.getenv("LABTOKEN", "")
 
 # Logs: persist to /data if you add a Render Disk, else current dir
 LOG_DIR  = "/data" if os.path.isdir("/data") else "."
@@ -59,7 +59,7 @@ class Design(BaseModel):
 
 class ExperimentRequest(BaseModel):
     objective: str
-    target: Optional[dict] = None
+    target: Optional[dict] = None  # may include {"thickness_nm":..., "tolerance_nm":..., "initial_oxide_nm":...}
     design: Design
     notes: Optional[str] = None
     student_id: str
@@ -72,21 +72,54 @@ class ExperimentResponse(BaseModel):
     tech_note: str
     uid: str
 
-# ---------- Simulator ----------
+# ---------- Simulator helpers ----------
+
 def get_rng(student_id: str) -> random.Random:
     seed = int(hashlib.sha256((student_id + ASSIGNMENT_ID).encode()).hexdigest(), 16) % (2**32)
     return random.Random(seed)
 
-def growth_nm(temp_C: int, ambient: str, time_min: int) -> float:
-    DRY = {900:0.6, 1000:1.0, 1100:3.3}
-    WET = {900:2.0, 1000:5.0, 1100:10.0}
-    base = (DRY if ambient == "dry" else WET)[temp_C]
-    return base * time_min
+def deal_grove_thickness_nm(temp_C: int, ambient: str, time_min: int, x0_nm: float = 0.0) -> float:
+    """
+    Deal–Grove-like toy model. Returns final oxide thickness (nm) after time_min,
+    starting from initial oxide x0_nm. Parameters are pedagogical and tunable.
+    Solves x^2 + A x = (x0^2 + A x0) + B t  for x (units: A [um], B [um^2/min]).
+    """
+    A_um = {
+        ('dry', 900): 0.080, ('dry', 1000): 0.070, ('dry', 1100): 0.060,
+        ('wet', 900): 0.040, ('wet', 1000): 0.035, ('wet', 1100): 0.030,
+    }
+    B_um2_per_min = {
+        ('dry', 900): 1.0e-4, ('dry', 1000): 2.0e-4, ('dry', 1100): 6.0e-4,
+        ('wet', 900): 6.0e-4, ('wet', 1000): 2.0e-3, ('wet', 1100): 5.0e-3,
+    }
+
+    key = (ambient, temp_C)
+    if key not in A_um or key not in B_um2_per_min:
+        raise HTTPException(
+            status_code=400,
+            detail=f"temp_C must be one of [900, 1000, 1100] and ambient in [dry, wet]; got temp_C={temp_C}, ambient={ambient}."
+        )
+
+    A = A_um[key]
+    B = B_um2_per_min[key]
+    x0_um = max(0.0, float(x0_nm) / 1000.0)
+    rhs = x0_um * x0_um + A * x0_um + B * float(time_min)
+    disc = A * A + 4.0 * rhs
+    x_um = (-A + math.sqrt(max(0.0, disc))) / 2.0
+    return max(0.0, 1000.0 * x_um)  # nm
 
 # ---------- Routes ----------
 @app.post("/run_experiments", response_model=ExperimentResponse)
 def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(None)):
     check_token(x_labtoken)
+
+    # Optional initial oxide from target (e.g., pad oxide)
+    x0_nm = 0.0
+    if req.target and isinstance(req.target, dict) and "initial_oxide_nm" in req.target:
+        try:
+            x0_nm = float(req.target["initial_oxide_nm"])
+        except Exception:
+            raise HTTPException(status_code=400, detail="target.initial_oxide_nm must be numeric if provided.")
 
     rng = get_rng(req.student_id)
     rows = [("run_id","temp_C","ambient","time_min","orientation","preclean",
@@ -94,16 +127,25 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
     centers = []
 
     for i, r in enumerate(req.design.runs, start=1):
-        mean = growth_nm(r.temp_C, r.ambient, r.time_min)
+        # Deal–Grove base (nm)
+        base = deal_grove_thickness_nm(r.temp_C, r.ambient, r.time_min, x0_nm=x0_nm)
+
+        # Systematic effects
         orient_k = 0.90 if r.orientation == "111" else 1.00
         pre_k    = 1.05 if r.preclean else 1.00
+        mean = base * orient_k * pre_k
+
+        # Noise (~4% with occasional extra wiggle)
         base_noise_sigma = 0.04
         big_bump = 1.0 + abs(rng.gauss(0, 0.5)) * 0.01
         noise = rng.gauss(0, base_noise_sigma) * big_bump
-        center = max(0.0, mean * orient_k * pre_k * (1 + noise))
+        center = max(0.0, mean * (1 + noise))
+
+        # Nonuniformity: edge thinner; wet generally worse
         nonuni_base = 0.02 + (0.03 if r.ambient == "wet" else 0.015)
         nonuni = nonuni_base * (1 + abs(rng.gauss(0, 0.6)))
         edge = max(0.0, center * (1 - nonuni))
+
         rows.append((i, r.temp_C, r.ambient, r.time_min, r.orientation, r.preclean,
                      round(center,1), round(edge,1), round(100*nonuni,1)))
         centers.append(center)
@@ -131,8 +173,10 @@ def run_experiments(req: ExperimentRequest, x_labtoken: Optional[str] = Header(N
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(line)
 
-    note = ("Runs completed. Thickness increases with temperature/time; wet grows faster. "
-            "Uniformity is typically worse for wet. Consider a confirmation near target and a uniformity check.")
+    note = (
+        "Runs completed. Thickness increases with temperature/time; wet grows faster. "
+        "Uniformity is typically worse for wet. Consider a confirmation near target and a uniformity check."
+    )
     uid = f"{req.student_id}-{int(time.time())}"
 
     return ExperimentResponse(
