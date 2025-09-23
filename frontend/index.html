@@ -36,6 +36,69 @@
 
   <label for="json">Your DOE JSON</label>
   <textarea id="json" rows="16"></textarea>
+  <div class="card" id="json-builder">
+    <h3>Quick JSON Builder (optional)</h3>
+  
+    <div class="row">
+      <label>Strategy
+        <select id="b-strategy">
+          <option>screening</option>
+          <option>confirmation</option>
+          <option>optimization</option>
+        </select>
+      </label>
+      <label>Student ID
+        <input id="b-student" placeholder="yourNetID" />
+      </label>
+    </div>
+  
+    <div class="row">
+      <label>Target (nm)
+        <input id="b-target" type="number" value="100" min="1" />
+      </label>
+      <label>Tolerance (nm)
+        <input id="b-tol" type="number" value="5" min="0" />
+      </label>
+      <label>Initial oxide (nm)
+        <input id="b-x0" type="number" value="0" min="0" />
+      </label>
+    </div>
+  
+    <details style="margin-top:.5rem;">
+      <summary><b>Add a run</b></summary>
+      <div class="row">
+        <label>temp_C (800–1200, step 10)
+          <input id="b-temp" type="number" min="800" max="1200" step="10" value="1000" />
+        </label>
+        <label>ambient
+          <select id="b-amb"><option>dry</option><option>wet</option></select>
+        </label>
+        <label>time_min (5–240)
+          <input id="b-time" type="number" min="5" max="240" step="1" value="60" />
+        </label>
+      </div>
+      <div class="row">
+        <label>orientation
+          <select id="b-orient"><option value="100">100</option><option value="111">111</option></select>
+        </label>
+        <label style="display:flex;align-items:center;gap:.5rem;">
+          <input id="b-preclean" type="checkbox" checked /> preclean
+        </label>
+        <button id="b-add" type="button">+ Add run</button>
+      </div>
+    </details>
+  
+    <div id="b-runs" style="margin-top:.5rem;"></div>
+  
+    <div class="row" style="margin-top:.5rem;">
+      <button id="b-build" type="button">Build JSON → textarea</button>
+      <button id="b-clear" type="button">Clear runs</button>
+    </div>
+  
+    <small style="color:#555;display:block;margin-top:.5rem;">
+      Constraints: temp_C ∈ {800…1200 by 10}, time_min ∈ [5,240], ambient ∈ {dry,wet}, orientation ∈ {100,111}, runs: 1–12.
+    </small>
+  </div>
 
   <div class="row">
     <button id="submit">Run Experiments</button>
@@ -193,5 +256,119 @@
     }; // end submit
   }); // end DOMContentLoaded
   </script>
+
+  <script>
+  document.addEventListener("DOMContentLoaded", () => {
+    const q = (s) => document.querySelector(s);
+    const runs = [];
+  
+    const el = {
+      box: q("#json"),
+      strat: q("#b-strategy"),
+      student: q("#b-student"),
+      target: q("#b-target"),
+      tol: q("#b-tol"),
+      x0: q("#b-x0"),
+      temp: q("#b-temp"),
+      amb: q("#b-amb"),
+      time: q("#b-time"),
+      orient: q("#b-orient"),
+      pre: q("#b-preclean"),
+      add: q("#b-add"),
+      list: q("#b-runs"),
+      build: q("#b-build"),
+      clear: q("#b-clear"),
+    };
+  
+    function renderRuns() {
+      if (!runs.length) { el.list.innerHTML = "<i>No runs added yet.</i>"; return; }
+      let html = '<table style="width:100%;border-collapse:collapse;"><thead><tr>' +
+        ["#", "temp_C", "ambient", "time_min", "orientation", "preclean", ""]
+        .map(h => `<th style="text-align:left;border-bottom:1px solid #ddd;padding:.25rem 0;">${h}</th>`).join("") +
+      "</tr></thead><tbody>";
+      runs.forEach((r, i) => {
+        html += `<tr>
+          <td style="padding:.25rem 0;">${i+1}</td>
+          <td>${r.temp_C}</td><td>${r.ambient}</td><td>${r.time_min}</td>
+          <td>${r.orientation}</td><td>${r.preclean}</td>
+          <td><button data-i="${i}" class="b-del" type="button">remove</button></td>
+        </tr>`;
+      });
+      html += "</tbody></table>";
+      el.list.innerHTML = html;
+      el.list.querySelectorAll(".b-del").forEach(btn => {
+        btn.onclick = () => { runs.splice(parseInt(btn.dataset.i,10), 1); renderRuns(); };
+      });
+    }
+  
+    el.add.onclick = () => {
+      const tC = parseInt(el.temp.value, 10);
+      const tM = parseInt(el.time.value, 10);
+      const amb = el.amb.value;
+      const orient = el.orient.value;
+      const pre = !!el.pre.checked;
+  
+      // validate
+      if (isNaN(tC) || tC < 800 || tC > 1200 || tC % 10 !== 0) return alert("temp_C must be 800–1200 in steps of 10.");
+      if (isNaN(tM) || tM < 5 || tM > 240) return alert("time_min must be 5–240.");
+      if (!["dry","wet"].includes(amb)) return alert("ambient must be dry/wet.");
+      if (!["100","111"].includes(orient)) return alert("orientation must be 100 or 111.");
+      if (runs.length >= 12) return alert("Max 12 runs.");
+  
+      runs.push({ temp_C: tC, ambient: amb, time_min: tM, orientation: orient, preclean: pre });
+      renderRuns();
+    };
+  
+    el.clear.onclick = () => { runs.length = 0; renderRuns(); };
+  
+    el.build.onclick = () => {
+      if (!el.student.value.trim()) return alert("Please enter your Student ID (NetID).");
+      if (runs.length === 0) return alert("Add at least one run.");
+  
+      const payload = {
+        objective: `Hit ${parseFloat(el.target.value||"0")} nm within ±${parseFloat(el.tol.value||"0")} nm`,
+        target: {
+          thickness_nm: parseFloat(el.target.value||"0"),
+          tolerance_nm: parseFloat(el.tol.value||"0"),
+          initial_oxide_nm: parseFloat(el.x0.value||"0")
+        },
+        design: {
+          strategy: el.strat.value,
+          runs: runs.map(r => ({
+            temp_C: r.temp_C,
+            ambient: r.ambient,
+            time_min: r.time_min,
+            orientation: r.orientation,
+            preclean: r.preclean
+          }))
+        },
+        notes: "",
+        student_id: el.student.value.trim(),
+        section: "ECSE 322/415 F25"
+      };
+  
+      // final guardrails (mirror backend)
+      const ok = payload.design.runs.every(r =>
+        Number.isInteger(r.temp_C) && r.temp_C >= 800 && r.temp_C <= 1200 && r.temp_C % 10 === 0 &&
+        ["dry","wet"].includes(r.ambient) &&
+        Number.isInteger(r.time_min) && r.time_min >= 5 && r.time_min <= 240 &&
+        ["100","111"].includes(r.orientation) &&
+        (r.preclean === true || r.preclean === false)
+      );
+      if (!ok) return alert("One or more runs are out of spec.");
+  
+      el.box.value = JSON.stringify(payload, null, 2);
+      // keep their last JSON in localStorage (if your other script does this too, great)
+      try { localStorage.setItem("lastDOE", el.box.value); } catch {}
+      alert("JSON built! Review in the textbox, then click Run Experiments.");
+    };
+  
+    // init
+    renderRuns();
+  });
+  </script>
+
+  
 </body>
 </html>
+
