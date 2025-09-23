@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi.responses import Response
 from pydantic import BaseModel, Field, validator
 from typing import List, Literal, Optional, Dict, Tuple
 import hashlib, io, base64, csv, math, random, time, os, json, datetime
@@ -32,6 +33,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],  # allow x-labtoken + content-type, etc.
 )
+
+FRONTEND_ORIGIN = (ALLOWED[0] if ALLOWED else "https://microchip-fabrication-tech.onrender.com").strip()
+
+@app.options("/run_experiments")
+def options_run_experiments():
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": FRONTEND_ORIGIN,
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, x-labtoken",
+            "Access-Control-Max-Age": "600",
+        },
+    )
 
 @app.get("/health")
 def health():
@@ -302,3 +317,4 @@ def stats(x_labtoken: Optional[str] = Header(None), token: Optional[str] = None)
                 counts[sid] = counts.get(sid, 0) + 1
                 total += 1
     return JSONResponse({"by_student": counts, "total": total})
+
